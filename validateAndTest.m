@@ -1,4 +1,4 @@
-function results = validateAndTest(bold, stimuli, NUM_RUNS, TRS_PER_RUN, trainingStimuli, trainingCategories, testingStimuli, testingCategories, testingConditions, valFlags, excludeRun,blockVoting,numvox,quiet)
+function [accs confmats] = validateAndTest(bold, stimuli, NUM_RUNS, TRS_PER_RUN, trainingStimuli, trainingCategories, testingStimuli, testingCategories, testingConditions, valFlags, excludeRun, blockVoting, numvox, quiet)
 
 % Note: this function requires libsvm http://www.csie.ntu.edu.tw/~cjlin/libsvm/
 
@@ -6,9 +6,10 @@ function results = validateAndTest(bold, stimuli, NUM_RUNS, TRS_PER_RUN, trainin
 % bold: numvox x timepoints 
 % stimuli: timepoints x 1 label vector, with distinct categories labeled 1,2,...
 %   These should have already been shifted to account for hemodynamic lag
+%   No-stimuli timepoints should be labeled 0 (for use in voxel selection)
 % NUM_RUNS, TRS_PER_RUN: number of independent runs and length of each
 %     If you want to leave out multiple runs together (e.g. if it takes multiple runs
-%     to display all categories) then this should be the number of length of the pseudoruns
+%     to display all categories) then this should be the number and length of the pseudoruns
 % trainingStimuli: the set of labels for training (same key as stimuli vector)
 % trainingCategories: the classes of the training stimuli, labeled 1,2,... (NOT the same as stimuli vector)
 % testing Stimuli: the set of labels for testing (same key as stimuli vector)
@@ -17,11 +18,17 @@ function results = validateAndTest(bold, stimuli, NUM_RUNS, TRS_PER_RUN, trainin
 % valFlags: which testing conditions to use for tuning hyperparameters (0/1)
 % excludeRun: whether to disallow testing and training in the same run
 % blockVoting: whether each block should take a majority vote to determine category
-% numvox: number of voxels to use (chosen by visual response z-score), use -1 to use all voxels
+% numvox: number of voxels to use (chosen by non-zero vs. zero timepoint z-score),
+%     Use -1 to use all voxels
 %     Can also be given as a fraction [0 1]
 % quiet: set to 1 to suppress extra output
 
-% Output: a vector of accuracies for each testing condition
+% Outputs:
+% accs: a vector of accuracies for each testing condition
+% confmats (optional): a num conditions x num test cats x num test cats
+% matrix showing counts of actual categories (dim 2) vs predicted categories (dim 3)
+% These counts are in TRs, or in blocks if blockVoting is enabled
+% If there is only one condition, the first dimension is removed
 
 % Examples
 % Assume we have 4 stimuli:
@@ -41,6 +48,9 @@ function results = validateAndTest(bold, stimuli, NUM_RUNS, TRS_PER_RUN, trainin
 %   ([1 2 3 4],[1 1 2 2],[1 2 3 4],[1 1 2 2],[1 1 1 1],[1 1 1 1])
 % Male hat classifier with cross-decoding to female hat classification
 %   ([1 2],[1 2],[1 2 3 4],[1 2 1 2],[1 1 2 2],[1 1 0 0])
+
+% In old versions of Matlab (pre-2009b) you will need to replace the tilde
+% dummy variables (~) with a named dummy variable (any name not in use)
 
 % Copyright (c) 2014, Christopher Baldassano, Stanford University
 % All rights reserved.
@@ -85,6 +95,8 @@ if (numvox > size(bold,1))
     numvox = size(bold,1);
 end
 
+
+confmats = zeros(length(unique(testingConditions)),max(testingCategories),max(testingCategories));
 testingRunAcc = zeros(NUM_RUNS,length(unique(testingConditions)));
 cvParams = zeros(NUM_RUNS,NUM_RUNS);
 for testingRun = 1:NUM_RUNS
@@ -92,11 +104,12 @@ for testingRun = 1:NUM_RUNS
         disp([num2str(testingRun) '/' num2str(NUM_RUNS) ' starting']);
     end
     validRunsForCondition = zeros(length(unique(testingConditions)),1);
-   for validationRun = 1:NUM_RUNS
+    
+	for validationRun = 1:NUM_RUNS
         if (testingRun == validationRun)
             continue;
         end
-        
+
         % First, choose best parameters by holding out validationRun
         trainingInds = cell(max(trainingCategories),1);
         for c = 1:length(trainingInds)
@@ -108,17 +121,14 @@ for testingRun = 1:NUM_RUNS
                                       ~ismember(runNum,testingRun));
             end
         end
-                               
-       testingInds = cell(max(testingCategories),1);
-       for c = 1:length(testingInds)
+
+        testingInds = cell(max(testingCategories),1);
+        for c = 1:length(testingInds)
            testingInds{c} = find(ismember(stimuli,testingStimuli(testingCategories==c & valFlags)) & ...
                                  runNum == validationRun);
-       end
+        end
 
-       assert(isempty(intersect(cell2mat(trainingInds),cell2mat(testingInds))));
-
-        % Try all combination of cross-validation variables
-        accCV = zeros(length(costs),1);
+        assert(isempty(intersect(cell2mat(trainingInds),cell2mat(testingInds))));
         
         voxelZ = zeros(size(bold,1),1);
         for voxel = 1:size(bold,1)
@@ -129,9 +139,10 @@ for testingRun = 1:NUM_RUNS
         end
 
         [~, indNoise] = sort(voxelZ,'descend');
-
         processedBold = bold(indNoise(1:numvox),:);
 
+        % Try all possible cost hyperparameters
+        accCV = zeros(length(costs),1);
         c = 1;
         for cost = costs
 
@@ -153,16 +164,16 @@ for testingRun = 1:NUM_RUNS
         % This is experimental, but seems to work well in choosing robust
         % parameters
         accCV(:) = smooth(accCV(:),5,'sgolay');
-       [~,bestCost] = max(accCV(:));
+        [~,bestCost] = max(accCV(:));
 
-       cvParams(testingRun,validationRun) = costs(bestCost);
-       
-       if (~quiet && (bestCost == 1 || bestCost == length(costs)))
+        cvParams(testingRun,validationRun) = costs(bestCost);
+
+        if (~quiet && (bestCost == 1 || bestCost == length(costs)))
            disp(['Selected cost ' num2str(costs(bestCost)) ', consider changing range']);
-       end
+        end
        
-       %Now, test on testing run
-       trainingInds = cell(max(trainingCategories),1);
+        %Now, test on testing run
+        trainingInds = cell(max(trainingCategories),1);
         for c = 1:length(trainingInds)
             if (excludeRun)
                 trainingInds{c} = find(ismember(stimuli,trainingStimuli(trainingCategories==c)) & ...
@@ -171,35 +182,42 @@ for testingRun = 1:NUM_RUNS
                 trainingInds{c} = find(ismember(stimuli,trainingStimuli(trainingCategories==c)));
             end
         end
-        
+
         %Train classifier
         [model means scaling] = svmtrain_wrapper(processedBold,costs(bestCost),trainingInds);
-    
+
         % Test independently on each of the testing conditions
         for condition = unique(testingConditions)
-           testingInds = cell(max(testingCategories),1);
-           for c = 1:length(testingInds)
+            testingInds = cell(max(testingCategories),1);
+            for c = 1:length(testingInds)
                testingInds{c} = find(ismember(stimuli,testingStimuli(testingCategories==c & testingConditions == condition)) & ...
                                      runNum == testingRun);
-           end
+            end
 
-           if (isempty(cell2mat(testingInds)))
+            if (isempty(cell2mat(testingInds)))
                continue;
-           end
-           
+            end
+
             assert(isempty(intersect(cell2mat(trainingInds),cell2mat(testingInds))))
 
-            accuracy = svmpredict_wrapper(processedBold,model,means,scaling,testingInds,blockVoting);
+            [accuracy condConfmat] = svmpredict_wrapper(processedBold,model,means,scaling,testingInds,blockVoting);
+            confmats(condition,:,:) = confmats(condition,:,:) + reshape(condConfmat,1,size(confmats,2),size(confmats,3));
 
             testingRunAcc(testingRun,condition) = testingRunAcc(testingRun,condition) + accuracy;
             validRunsForCondition(condition) = validRunsForCondition(condition)+1;
         end
-   end
-   for condition = unique(testingConditions)
-        testingRunAcc(testingRun,condition) = testingRunAcc(testingRun,condition)/validRunsForCondition(condition);   end
+	end
+    for condition = unique(testingConditions)
+        testingRunAcc(testingRun,condition) = testingRunAcc(testingRun,condition)/validRunsForCondition(condition);
+    end
 end
 
-results = zeros(1,length(unique(testingConditions)));
-for condition = 1:size(results,2)
-    results(condition) = mean(testingRunAcc(~isnan(testingRunAcc(:,condition)),condition));
+accs = zeros(1,length(unique(testingConditions)));
+for condition = 1:size(accs,2)
+    accs(condition) = mean(testingRunAcc(~isnan(testingRunAcc(:,condition)),condition));
+end
+
+if (size(confmats,1) == 1)
+    confmats = squeeze(confmats);
+end
 end

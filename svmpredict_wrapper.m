@@ -1,8 +1,9 @@
-function predictAcc = svmpredict_wrapper(bold,model,means,scaling,testingInds,blockVoting)
+function [predictAcc confmat] = svmpredict_wrapper(bold,model,means,scaling,testingInds,blockVoting)
 
-testingData = cell(length(testingInds),1);
+numCats = length(testingInds);
+testingData = cell(numCats,1);
 labels = [];
-for c = 1:length(testingInds)
+for c = 1:numCats
     testingData{c} = bold(:,testingInds{c})';
     labels = [labels;c*ones(length(testingInds{c}),1)];
     
@@ -12,19 +13,29 @@ for c = 1:length(testingInds)
 end
 allTestingData = cell2mat(testingData);
 
-[predictedlabel, accuracy, ~] = svmpredict(labels, allTestingData, model);
+[predictedlabel, accuracy] = svmpredict(labels, allTestingData, model);
 if (~blockVoting)
     predictAcc = accuracy(1);
+    if (nargout > 1)
+        confmat = zeros(numCats,numCats);
+        for c1 = 1:numCats
+            for c2 = 1:numCats
+                confmat(c1,c2) = sum(labels==c1 & predictedlabel == c2);
+            end
+        end
+    end
 else
     labelInd = 1;
-    predictionsByClass = cell(length(testingInds),1);
-    for c = 1:length(testingInds)
+    predictionsByClass = cell(numCats,1);
+    for c = 1:numCats
         predictionsByClass{c} = predictedlabel(labelInd:labelInd+length(testingInds{c})-1);
         labelInd = labelInd + length(testingInds{c});
     end
     
     blockAcc = [];
-    for c = 1:length(testingInds)
+    blockPred = [];
+    blockTrue = [];
+    for c = 1:numCats
         if (isempty(testingInds{c}))
             continue;
         end
@@ -35,7 +46,9 @@ else
                 i = i + 1;  
             end
             
-            blockAcc = [blockAcc 100*(mode(predictionsByClass{c}(blockStart:i-1))==c)];
+            blockPred = [blockPred mode(predictionsByClass{c}(blockStart:i-1))];
+            blockTrue = [blockTrue c];
+            blockAcc = [blockAcc 100*(blockPred(end)==c)];
             
             if (i > length(testingInds{c}))
                 break;
@@ -47,6 +60,15 @@ else
     end
     
     predictAcc = mean(blockAcc);
+    
+    if (nargout > 1)
+        confmat = zeros(numCats,numCats);
+        for c1 = 1:numCats
+            for c2 = 1:numCats
+                confmat(c1,c2) = sum(blockTrue==c1 & blockPred == c2);
+            end
+        end
+    end
     
 end
     
