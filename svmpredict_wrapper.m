@@ -13,7 +13,7 @@ for c = 1:numCats
 end
 allTestingData = cell2mat(testingData);
 
-[predictedlabel, accuracy] = svmpredict(labels, allTestingData, model);
+[predictedlabel, accuracy, ~] = svmpredict(labels, allTestingData, model);
 if (~blockVoting)
     predictAcc = accuracy(1);
     if (nargout > 1)
