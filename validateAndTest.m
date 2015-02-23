@@ -1,15 +1,20 @@
-function [accs confmats] = validateAndTest(bold, stimuli, NUM_RUNS, TRS_PER_RUN, trainingStimuli, trainingCategories, testingStimuli, testingCategories, testingConditions, valFlags, excludeRun, blockVoting, numvox, quiet)
+function [accs confmats] = validateAndTest(bold, stimuli, num_runs, trainingStimuli, trainingCategories, testingStimuli, testingCategories, testingConditions, valFlags, excludeRun, blockVoting, numvox, costs)
 
 % Note: this function requires libsvm http://www.csie.ntu.edu.tw/~cjlin/libsvm/
 
 % Inputs:
+
+% Required:
 % bold: numvox x timepoints 
-% stimuli: timepoints x 1 label vector, with distinct categories labeled 1,2,...
+% stimuli: timepoints x 1 label vector, with distinct categories labeled
+%   with distinct values (do not have to be sequential)
 %   These should have already been shifted to account for hemodynamic lag
 %   No-stimuli timepoints should be labeled 0 (for use in voxel selection)
-% NUM_RUNS, TRS_PER_RUN: number of independent runs and length of each
+% num_runs: number of independent runs (assumed to be concatenated together)
 %     If you want to leave out multiple runs together (e.g. if it takes multiple runs
-%     to display all categories) then this should be the number and length of the pseudoruns
+%     to display all categories) then this should be the number of the pseudoruns
+
+% Advanced (Optional):
 % trainingStimuli: the set of labels for training (same key as stimuli vector)
 % trainingCategories: the classes of the training stimuli, labeled 1,2,... (NOT the same as stimuli vector)
 % testing Stimuli: the set of labels for testing (same key as stimuli vector)
@@ -21,7 +26,8 @@ function [accs confmats] = validateAndTest(bold, stimuli, NUM_RUNS, TRS_PER_RUN,
 % numvox: number of voxels to use (chosen by non-zero vs. zero timepoint z-score),
 %     Use -1 to use all voxels
 %     Can also be given as a fraction [0 1]
-% quiet: set to 1 to suppress extra output
+% costs: list of cost hyperparameters to try during cross-validation
+
 
 % Outputs:
 % accs: a vector of accuracies for each testing condition
@@ -29,6 +35,7 @@ function [accs confmats] = validateAndTest(bold, stimuli, NUM_RUNS, TRS_PER_RUN,
 % matrix showing counts of actual categories (dim 2) vs predicted categories (dim 3)
 % These counts are in TRs, or in blocks if blockVoting is enabled
 % If there is only one condition, the first dimension is removed
+
 
 % Examples
 % Assume we have 4 stimuli:
@@ -52,39 +59,42 @@ function [accs confmats] = validateAndTest(bold, stimuli, NUM_RUNS, TRS_PER_RUN,
 % In old versions of Matlab (pre-2009b) you will need to replace the tilde
 % dummy variables (~) with a named dummy variable (any name not in use)
 
-% Copyright (c) 2014, Christopher Baldassano, Stanford University
-% All rights reserved.
-% 
-% Redistribution and use in source and binary forms, with or without
-% modification, are permitted provided that the following conditions are met:
-%     * Redistributions of source code must retain the above copyright
-%       notice, this list of conditions and the following disclaimer.
-%     * Redistributions in binary form must reproduce the above copyright
-%       notice, this list of conditions and the following disclaimer in the
-%       documentation and/or other materials provided with the distribution.
-%     * Neither the name of Stanford University nor the
-%       names of its contributors may be used to endorse or promote products
-%       derived from this software without specific prior written permission.
-% 
-% THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-% ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-% WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-% DISCLAIMED. IN NO EVENT SHALL CHRISTOPHER BALDASSANO BE LIABLE FOR ANY
-% DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-% (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-% LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-% ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-% (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-% SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+% Set defaults for inputs
+if (~exist('trainingStimuli','var') || ~exist('trainingCategories','var') || ...
+     isempty(trainingStimuli) || isempty(trainingCategories))
+    trainingStimuli = unique(stimuli(stimuli>0));
+    trainingCategories = 1:length(trainingStimuli);
+end
+if (~exist('testingStimuli','var') || ~exist('testingCategories','var') || ...
+     isempty(testingStimuli) || isempty(testingCategories))
+    testingStimuli = trainingStimuli;
+    testingCategories = trainingCategories;
+end
+if (~exist('testingConditions','var') || isempty(testingConditions))
+    testingConditions = ones(1,length(testingStimuli));
+end
+if (~exist('valFlags','var') || isempty(valFlags))
+    valFlags = ones(1,length(testingConditions));
+end
+if (~exist('excludeRun','var') || isempty(excludeRun))
+    excludeRun = 1;
+end
+if (~exist('blockVoting','var') || isempty(blockVoting))
+    blockVoting = 0;
+end
+if (~exist('numvox','var') || isempty(numvox))
+    numvox = -1;
+end
+if (~exist('costs','var') || isempty(costs))
+    costs = logspace(-5,1.5,20);
+end
 
 % If training and testing stimuli overlap, training stimuli cannot be drawn
 % from the testing run
 assert(excludeRun || isempty(intersect(trainingStimuli,testingStimuli)));
 
-runNum = cumsum(repmat([1;zeros(TRS_PER_RUN-1,1)],NUM_RUNS,1));
-
-%Costs to try in cross-validation
-costs = logspace(-5,1.5,20);
+runNum = cumsum(repmat([1;zeros(length(stimuli)/num_runs-1,1)],num_runs,1));
 
 if (numvox <= 0)
     numvox = size(bold,1);
@@ -97,42 +107,89 @@ end
 
 
 confmats = zeros(length(unique(testingConditions)),max(testingCategories),max(testingCategories));
-testingRunAcc = zeros(NUM_RUNS,length(unique(testingConditions)));
-cvParams = zeros(NUM_RUNS,NUM_RUNS);
-for testingRun = 1:NUM_RUNS
-    if (~quiet)
-        disp([num2str(testingRun) '/' num2str(NUM_RUNS) ' starting']);
-    end
-    validRunsForCondition = zeros(length(unique(testingConditions)),1);
-    
-	for validationRun = 1:NUM_RUNS
-        if (testingRun == validationRun)
-            continue;
-        end
-
-        % First, choose best parameters by holding out validationRun
-        trainingInds = cell(max(trainingCategories),1);
-        for c = 1:length(trainingInds)
-            if (excludeRun)
-                trainingInds{c} = find(ismember(stimuli,trainingStimuli(trainingCategories==c)) & ...
-                                      ~ismember(runNum,[testingRun validationRun]));
-            else
-                trainingInds{c} = find(ismember(stimuli,trainingStimuli(trainingCategories==c)) & ...
-                                      ~ismember(runNum,testingRun));
+testingRunAcc = NaN(num_runs,length(unique(testingConditions)));
+for testingRun = 1:num_runs
+    % First, choose best hyperparameter by holding out validationRun
+    if (length(costs)==1)
+        meancost = costs(1);
+    else
+        bestCosts = -1*ones(num_runs,1);
+        for validationRun = 1:num_runs
+            if (testingRun == validationRun)
+                continue;
             end
-        end
 
-        testingInds = cell(max(testingCategories),1);
-        for c = 1:length(testingInds)
-           testingInds{c} = find(ismember(stimuli,testingStimuli(testingCategories==c & valFlags)) & ...
-                                 runNum == validationRun);
-        end
+            % Construct training set
+            trainingInds = cell(max(trainingCategories),1);
+            for c = 1:length(trainingInds)
+                if (excludeRun)
+                    trainingInds{c} = find(ismember(stimuli,trainingStimuli(trainingCategories==c)) & ...
+                                          ~ismember(runNum,[testingRun validationRun]));
+                else
+                    trainingInds{c} = find(ismember(stimuli,trainingStimuli(trainingCategories==c)) & ...
+                                          ~ismember(runNum,testingRun));
+                end
+            end
 
-        assert(isempty(intersect(cell2mat(trainingInds),cell2mat(testingInds))));
+            % Construct testing set
+            testingInds = cell(max(testingCategories),1);
+            for c = 1:length(testingInds)
+               testingInds{c} = find(ismember(stimuli,testingStimuli(testingCategories==c & valFlags)) & ...
+                                     runNum == validationRun);
+            end
+
+            assert(isempty(intersect(cell2mat(trainingInds),cell2mat(testingInds))));
+
+            % Perform voxel selection
+            if (numvox < size(bold,1))
+                voxelZ = zeros(size(bold,1),1);
+                for voxel = 1:size(bold,1)
+                   restingMean = mean(bold(voxel,stimuli == 0 & ~ismember(runNum,[testingRun validationRun])));
+                   activeMean = mean(bold(voxel,cell2mat(trainingInds)));
+                   activeStd = std(bold(voxel,cell2mat(trainingInds)));
+                   voxelZ(voxel) = abs(activeMean - restingMean)/activeStd;
+                end
+
+                [~, indNoise] = sort(voxelZ,'descend');
+                processedBold = bold(indNoise(1:numvox),:);
+            else
+                processedBold = bold;
+            end
+
+            % Try all possible cost hyperparameters
+            accCV = zeros(length(costs),1);
+            c = 1;
+            for cost = costs
+
+                % Train and predict
+                [model means scaling] = svmtrain_wrapper(processedBold,cost,trainingInds);
+
+                % Note that block voting is always disabled (the last
+                % argument to svmpredict_wrapper) during validation,
+                % because it introduces more variability in the
+                % results)
+                accCV(c) = svmpredict_wrapper(processedBold,model,means,scaling,testingInds,0);
+
+                c = c+1;
+            end
+            clear cost
+
+            % Smooth the accuracy matrix before picking a best choice of parameters
+            % This is experimental, but seems to work well in choosing robust
+            % parameters
+            accCV(:) = smooth(accCV(:),5,'sgolay');
+            [~,bestCostInd] = max(accCV(:));
+            bestCosts(validationRun) = costs(bestCostInd);
+        end
         
+        meancost = exp(mean(log(bestCosts(bestCosts>0))));
+    end
+    
+    % Perform voxel selection, using all training runs
+    if (numvox < size(bold,1))
         voxelZ = zeros(size(bold,1),1);
         for voxel = 1:size(bold,1)
-           restingMean = mean(bold(voxel,stimuli == 0 & ~ismember(runNum,[testingRun validationRun])));
+           restingMean = mean(bold(voxel,stimuli == 0 & ~ismember(runNum,testingRun)));
            activeMean = mean(bold(voxel,cell2mat(trainingInds)));
            activeStd = std(bold(voxel,cell2mat(trainingInds)));
            voxelZ(voxel) = abs(activeMean - restingMean)/activeStd;
@@ -140,75 +197,42 @@ for testingRun = 1:NUM_RUNS
 
         [~, indNoise] = sort(voxelZ,'descend');
         processedBold = bold(indNoise(1:numvox),:);
-
-        % Try all possible cost hyperparameters
-        accCV = zeros(length(costs),1);
-        c = 1;
-        for cost = costs
-
-            % Train and predict
-            [model means scaling] = svmtrain_wrapper(processedBold,cost,trainingInds);
-
-            % Note that block voting is always disabled (the last
-            % argument to svmpredict_wrapper) during validation,
-            % because it introduces more variability in the
-            % results)
-            accCV(c) = svmpredict_wrapper(processedBold,model,means,scaling,testingInds,0);
-
-            c = c+1;
-        end
-        clear cost
-        
-
-        % Smooth the accuracy matrix before picking a best choice of parameters
-        % This is experimental, but seems to work well in choosing robust
-        % parameters
-        accCV(:) = smooth(accCV(:),5,'sgolay');
-        [~,bestCost] = max(accCV(:));
-
-        cvParams(testingRun,validationRun) = costs(bestCost);
-
-        if (~quiet && (bestCost == 1 || bestCost == length(costs)))
-           disp(['Selected cost ' num2str(costs(bestCost)) ', consider changing range']);
-        end
+    else
+        processedBold = bold;
+    end
        
-        %Now, test on testing run
-        trainingInds = cell(max(trainingCategories),1);
-        for c = 1:length(trainingInds)
-            if (excludeRun)
-                trainingInds{c} = find(ismember(stimuli,trainingStimuli(trainingCategories==c)) & ...
-                                      ~ismember(runNum,testingRun));
-            else
-                trainingInds{c} = find(ismember(stimuli,trainingStimuli(trainingCategories==c)));
-            end
+    % Construct training set
+    trainingInds = cell(max(trainingCategories),1);
+    for c = 1:length(trainingInds)
+        if (excludeRun)
+            trainingInds{c} = find(ismember(stimuli,trainingStimuli(trainingCategories==c)) & ...
+                                  ~ismember(runNum,testingRun));
+        else
+            trainingInds{c} = find(ismember(stimuli,trainingStimuli(trainingCategories==c)));
         end
+    end
 
-        %Train classifier
-        [model means scaling] = svmtrain_wrapper(processedBold,costs(bestCost),trainingInds);
+    %Train classifier
+    [model means scaling] = svmtrain_wrapper(processedBold,meancost,trainingInds);
 
-        % Test independently on each of the testing conditions
-        for condition = unique(testingConditions)
-            testingInds = cell(max(testingCategories),1);
-            for c = 1:length(testingInds)
-               testingInds{c} = find(ismember(stimuli,testingStimuli(testingCategories==c & testingConditions == condition)) & ...
-                                     runNum == testingRun);
-            end
-
-            if (isempty(cell2mat(testingInds)))
-               continue;
-            end
-
-            assert(isempty(intersect(cell2mat(trainingInds),cell2mat(testingInds))))
-
-            [accuracy condConfmat] = svmpredict_wrapper(processedBold,model,means,scaling,testingInds,blockVoting);
-            confmats(condition,:,:) = confmats(condition,:,:) + reshape(condConfmat,1,size(confmats,2),size(confmats,3));
-
-            testingRunAcc(testingRun,condition) = testingRunAcc(testingRun,condition) + accuracy;
-            validRunsForCondition(condition) = validRunsForCondition(condition)+1;
-        end
-	end
+    % Test independently on each of the testing conditions
     for condition = unique(testingConditions)
-        testingRunAcc(testingRun,condition) = testingRunAcc(testingRun,condition)/validRunsForCondition(condition);
+        testingInds = cell(max(testingCategories),1);
+        for c = 1:length(testingInds)
+           testingInds{c} = find(ismember(stimuli,testingStimuli(testingCategories==c & testingConditions == condition)) & ...
+                                 runNum == testingRun);
+        end
+
+        if (isempty(cell2mat(testingInds)))
+           continue;
+        end
+
+        assert(isempty(intersect(cell2mat(trainingInds),cell2mat(testingInds))))
+
+        [accuracy condConfmat] = svmpredict_wrapper(processedBold,model,means,scaling,testingInds,blockVoting);
+        confmats(condition,:,:) = confmats(condition,:,:) + reshape(condConfmat,1,size(confmats,2),size(confmats,3));
+
+        testingRunAcc(testingRun,condition) = accuracy;
     end
 end
 
